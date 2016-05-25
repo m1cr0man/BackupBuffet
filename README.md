@@ -9,4 +9,5 @@ Python 3
 - Run `python3 backupbuffet.py /path/to/data/to/backup /path/to/backup/drive [timeout] [-s]`
 
 The optional `timeout` argument is the maximum time in hours to spend backing up the data
+
 The `-s` flag will shutdown the computer once finished
