@@ -1,110 +1,71 @@
 import os
 from sys import argv
-from time import time
-from json import load, dump
+from json import load
 from shutil import copytree, disk_usage
 j = os.path.join
 
 # Logging file
 logFile = "backupbuffet.log"
 
-# First drive ID index
-driveID = 0
+# Source & Destination directories
+SRC = argv[1]
+DEST = argv[2]
 
-# Max free space to leave on the drive in bytes
-max_leftover_space = 100000
+class tree(object):
+    def __init__(self, files, folders):
+        self.files = sorted(files)
+        self.folders = sorted(folders)
 
-# Work out the deadline
-deadline = round(time() + float(argv[2]) * 3600)
+        # Files are 2-pair tuples, folders are trees
+        self.size = sum([f[1] for f in files] + [x.size for x in folders.items()])
 
-# Backed up files, format:
-# ]
-#  [
-#   path,
-#   path,
-#   path
-#  ],
-#  [
-#   path,
-#   path,
-#   path
-#  ]
-# ]
-# Root list is indexed by drive ID
-backup_log = []
-with open("backuplist.json", "r") as backup_log_save:
-    backup_log = load(backup_log_save)
-
-# Little info function to make life easier
-def info(message):
-    message += '\n'
-    with open(logFile, 'a', 0) as log:
-        log.write(message)
-    print(message)
-
-# Source directory heap
+# Source directory tree
 # Provides size at each sub dir
-def build_fs_heap(path):
+def build_fs_tree(path):
+
+    # Absolute(-ish) path
+    abs_path = j(SRC, path)
 
     # Listdir returns relative file names
-    contents = os.listdir(path)
-    dirs = [x for x in contents if os.path.isdir(x)]
-    files = list(set(contents) - set(dirs))
-    size = sum([os.path.getsize(j(path, f)) for f in files])
-    heap = {d: build_fs_heap(j(path, d)) for d in dirs}
-    size += sum([x[0] for x in heap.items()])
-    return {os.path.basename(path): {"size": size, "heap": heap}}
+    contents = os.listdir(abs_path)
+    dirs = [x for x in contents if os.path.isdir(j(abs_path, x))]
+    files = [(f, os.path.getsize(j(abs_path, f))) for f in list(set(contents) - set(dirs))]
+    folders = {d: build_fs_tree(j(path, d)) for d in dirs}
+    return tree(files, folders)
 
-# Checks if a path has been backed up
-def is_backed_up(path):
+# TODO: Check space usage
+def get_files(src_tree, backup_tree):
 
-    # Check if the path is covered in another drive
-    # and that this path isn't the child of one already backed up
-    for drive_dirs in backup_log:
-        for path_backed in drive_dirs:
-            if path_backed in path:
-                return True
-    return False
+    # If none of the folder is backed up, add the whole thing
+    if not backup_tree:
+        return (src_tree, src_tree)
 
-# Checks if a path's children have been backed up
-# Returns the shallowest path containing no backed-up files
-# Returns path and it's size if it is the shallowest path
-def get_backup_dirs(path, data):
-    used_space = 0
-    dirs = []
-    heap = data[1]
+    # Grab all the files that have to be backed up
+    dest_files = [f for f in src_tree.files if f not in backup_tree.files]
+    backup_tree.files += dest_files
 
-    # This must be done, because dirs could be the same len as heap.keys()
-    # but not contain all the elements of it
-    for folder, data in heap.items():
-        if not is_backed_up(j(path, folder)):
-            new_dirs, new_used_space = get_backup_dirs(j(path, folder), data)
-            used_space += new_used_space
-            dirs += new_dirs
+    # Check the subdirectories that can be backed up
+    dest_folders = {}
+    for folder, subtree in src_tree.folders.items():
+        backup_subtree = backup_tree.setdefault(folder, False)
+        dest_folders[folder], backup_tree[folder] = get_files(subtree, backup_subtree)
 
-    # Check if every child directory was used
-    # If so, use the root
-    if [j(path, folder) for folder in heap.keys()] == dirs:
-        dirs = [path]
-        used_space = data[0]
-    return (dirs, used_space)
+    # If the source and destination files and folders are the same, just return the source tree
+    if dest_files == src_tree.files and dest_folders == src_tree.folders:
+        return (src_tree, src_tree)
 
-# Gets a list of directories to back up
-def fill_path(path, heap, free_space, dirs_list):
-    possible_dirs = [(folder, data[0], data[1]) for folder, data in heap.items() if data[0] < free_space]
-
-    # If there are some root dirs that can be used go ahead
-    while free_space > 0 and len(possible_dirs):
-        for dir_data in possible_dirs:
-            new_dirs, used_space = get_backup_dirs(j(path, dir_data[0]), (dir_data[1], dir_data[2]))
-            dirs_list += new_dirs
-            free_space -= used_space
-
+    return (tree(dest_files, dest_folders), backup_tree)
 
 def main():
-    dirs = []
-    fill_path(os.path.dirname(argv[1]), build_fs_heap(argv[1]), disk_usage(argv[2]).free, dirs)
-    for path in dirs:
-        copytree(j(argv[1], path), j(argv[2], path))
+
+    # Build a directory tree
+    src_tree = build_fs_tree(".")
+
+    # Load the backup tree
+    backup_tree = []
+    with open(logFile, "r") as handle: backup_tree = load(handle)
+
+    # Get a list of files to back up, in a tree
+    dest_tree, backup_tree = get_files(src_tree, backup_tree)
 
 main()
