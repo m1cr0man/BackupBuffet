@@ -1,11 +1,11 @@
 import os
 from sys import argv
-from json import load, dump, JSONEncoder, JSONDecoder
-from shutil import disk_usage
+from json import load, dump, JSONEncoder
+from shutil import disk_usage, copy2, copytree, rmtree
 j = os.path.join
 
 # Logging file name
-logFile = "backupbuffet_global.json"
+LOGFILE = "backupbuffet.json"
 
 # Source & Destination directories
 SRC = argv[1]
@@ -15,34 +15,69 @@ DEST = argv[2]
 # 1gb
 MAX_FREE = 1024 ** 3
 
-class tree(object):
-    def __init__(self, files, folders, state=0, size=0):
-        self.files = sorted(files)
+# Drive ID
+DRIVE = 0
+
+# Simulation mode stuff
+if argv[3] == "--sim":
+    voider = lambda x: True
+    voider_2arg = lambda x, y: True
+    os.remove = voider
+    copy2 = voider_2arg
+    rmtree = voider
+    copytree = voider_2arg
+
+class File(object):
+    def __init__(self, size, mtime, action=0, drive=-1):
+        self.size = size
+        self.mtime = mtime
+        self.action = action
+        self.drive = drive
+
+class Tree(object):
+    def __init__(self, files, folders, size=0, action=0):
+        self.files = files
         self.folders = folders
 
-        # States: 0 = not backed up/incomplete.
-        #         1 = to be totally backed up (when dest files & folders equal source)
-        #         2 = backed up
-        self.state = state
+        if size:
+            self.size = size
+        else:
+            self.calc_size()
 
-        # Files = [tuple(name, size)]
-        # Folders = {name: tree(files, folders, size, state)}
-        self.size = size or sum([f[1] for f in files] + [x.size for x in folders.values()])
+        # Folders
+        # Actions: 0 = None
+        #          1 = Recusively back up (when dest files & folders equal source)
+        #          2 = Delete
+        # Note: Action 0 still means the folder should be iterated for sub changes
+        self.action = action
 
-# Encodes the trees in a JSON encodable way
-class treeJSONEncoder(JSONEncoder):
+        # Files
+        # Actions: 0 = None
+        #          1 = Back up
+        #          2 = Delete
+        #          3 = Modify
+
+        # Files = {name: File(size, mtime, action, drive)}
+        # Folders = {name: Tree(files, folders, size, action)}
+
+    def calc_size(self):
+        self.size = sum([f.size for f in self.files.values()] + [f.size for f in self.folders.values()])
+
+# Encodes the trees and files in a JSON encodable way
+class customJSONEncoder(JSONEncoder):
     def default(self, obj):
-        if isinstance(obj, tree):
-            return obj.__dict__
-        return JSONEncoder.default(self, obj)
+        return obj.__dict__ if isinstance(obj, Tree) or isinstance(obj, File) else JSONEncoder.default(self, obj)
 
-def treeJSONDecoder(obj):
+# Decodes trees and files from JSON objects (dictionaries)
+def customJSONDecoder(obj):
     if "files" in obj and "folders" in obj:
-        return tree(obj["files"], obj["folders"], obj["state"], obj["size"])
+        return Tree(obj["files"], obj["folders"], obj["size"], obj["action"])
+    if "mtime" in obj and "drive" in obj:
+        return File(obj["size"], obj["mtime"], obj["action"], obj["drive"])
     return obj
 
-# Source directory tree
-# Provides size at each sub dir
+# Source directory tree builder
+# Gets the size and mtime in one run
 def build_fs_tree(path):
 
     # Absolute(-ish) path
@@ -50,86 +85,198 @@ def build_fs_tree(path):
 
     # Listdir returns relative file names
     contents = os.listdir(abs_path)
-    dirs = [x for x in contents if os.path.isdir(j(abs_path, x))]
-    files = [(f, os.path.getsize(j(abs_path, f))) for f in list(set(contents) - set(dirs))]
+    dirs = [d for d in contents if os.path.isdir(j(abs_path, d))]
+    files = {f: File(os.path.getsize(j(abs_path, f)), os.path.getmtime(j(abs_path, f))) for f in list(set(contents) - set(dirs))}
     folders = {d: build_fs_tree(j(path, d)) for d in dirs}
-    return tree(files, folders)
+    return Tree(files, folders)
 
-def get_files(src_tree, backup_tree, free_space):
+# Sets backup dir of sub files to this drive
+def recurse_action(tree, set_drive=True, action=1):
+    for file in tree.files.values():
+        file.action = action
+        file.drive = DRIVE if set_drive else file.drive
+    for folder in tree.folders.values():
+        recurse_action(folder, set_drive, action)
 
-    # If none of the folder is backed up, add the whole thing
-    if not backup_tree and free_space - src_tree.size > 0:
-        src_tree.state = 1
-        return (src_tree, src_tree)
+# Get a list of files to back up (Add/Modify/Delete)
+def get_files(main_tree, backup_tree, free_space):
 
-    backup_tree = backup_tree or tree([], {})
+    # If none of the folder is backed up, back up the whole thing
+    if not backup_tree.size:
+        if free_space - main_tree.size > 0:
+            main_tree.action = 1
 
-    # If the entire folder is backed up, add nothing
-    if backup_tree.state == 1:
-        return (tree([], {}), backup_tree)
+            # Assign drive letter to all sub files
+            recurse_action(main_tree)
+            return (main_tree.size, main_tree)
 
-    # Grab all the files that have to be backed up
-    # And that there is space for
-    dest_files = []
-    for file in src_tree.files:
-        if file not in backup_tree and free_space - file[1] > 0:
-            dest_files.append(file)
-            free_space -= file[1]
-    backup_tree.files += dest_files
+    orig_free_space = free_space
 
-    # Check for subdirectories that can be backed up
-    dest_folders = {}
-    for folder, subtree in sorted(src_tree.folders.items()):
+    # Deletions
+    for fname in backup_tree.files.keys():
+        file = backup_tree.files[fname]
+        if fname not in main_tree.files and file.drive == DRIVE:
+            file.action = 2
+            free_space += file.size
+
+    # There's no way to tell if the folder is on this drive or not
+    # So we check on the fs before we delete in perform_fs_tasks
+    for fname in backup_tree.folders.keys():
+        folder = backup_tree.folders[fname]
+        if fname not in main_tree.folders:
+            folder.action = 2
+            recurse_action(folder, False, 2)
+            free_space += folder.size
+
+    # Files
+    for fname in sorted(main_tree.files.keys()):
+        if fname == LOGFILE or "backupbuffet.nextid" in fname:
+            continue
+
+        file = main_tree.files[fname]
+
+        # Addition
+        if fname not in backup_tree.files:
+            if free_space - file.size > 0:
+                file.action = 1
+                file.drive = DRIVE
+                backup_tree.files[fname] = file
+                free_space -= file.size
+
+        # Modification
+        elif file.mtime != backup_tree.files[fname].mtime and file.drive == DRIVE:
+            file.action = 3
+            backup_tree.files[fname] = file
+            free_space -= file.size - backup_tree.files[fname].size
+
+    # Folders
+    for fname in sorted(main_tree.folders.keys()):
+        folder = main_tree.folders[fname]
+
+        # Stop if there's no more free space
         if free_space < MAX_FREE:
             break
-        backup_subtree = backup_tree.setdefault(folder, False)
-        dest_folders[folder], backup_tree[folder] = get_files(subtree, backup_subtree, free_space)
-        free_space -= dest_folders[folder].size
 
-    # If the source and destination files and folders are the same, just return the source tree
-    if dest_files == src_tree.files and dest_folders == src_tree.folders:
-        src_tree.state = 1
-        return (src_tree, src_tree)
+        # TODO WHY THE FUCK ISNT THIS WORKING
+        if fname == "AddOns":
+            print(*["%s %d %d\n" % (i, v.action, v.drive) for i, v in backup_tree.folders[fname].files.items() if v.drive == -1])
 
-    return (tree(dest_files, dest_folders), backup_tree)
+        # Addition
+        backup_subtree = backup_tree.folders.setdefault(fname, Tree({}, {}))
+        size_diff, backup_subtree = get_files(folder, backup_subtree, free_space)
+        if size_diff:
+            backup_tree.folders[fname] = folder
+            free_space -= size_diff
 
-# Reads file and folder count from a tree
-def get_stats(dest_tree):
-    files, folders = 0, 0
-    for folder in dest_tree.folders.values():
-        sub_files, sub_folders = get_stats(folder)
-        files += sub_files
-        folders += sub_folders
+        # Recalculate size of backup subtree
+        backup_subtree.calc_size()
 
-    return (len(dest_tree.files) + files, len(dest_tree.folders) + folders)
+    # Recalculate size of backup tree
+    backup_tree.calc_size()
+
+    return (orig_free_space - free_space, backup_tree)
+
+def perform_fs_tasks(backup_tree, src_path=SRC, dest_path=DEST):
+    empty_folder = False
+    if not os.path.exists(dest_path):
+        print("Create folder " + dest_path)
+        os.mkdir(dest_path)
+        empty_folder = True
+
+    # Files
+    for fname in sorted(backup_tree.files.keys()):
+        file = backup_tree.files[fname]
+        if file.action >= 2:
+            print("Delete " + j(dest_path, fname))
+            os.remove(j(dest_path, fname))
+        if (file.action == 1 and file.drive == DRIVE) or file.action == 3:
+            print("Copy %s -> %s" % (j(src_path, fname), j(dest_path, fname)))
+            copy2(j(src_path, fname), j(dest_path, fname))
+            empty_folder = False
+        if file.action == 2:
+            del backup_tree.files[fname]
+        else:
+            file.action = 0
+
+    # Folders
+    for fname in sorted(backup_tree.folders.keys()):
+        folder = backup_tree.folders[fname]
+        if folder.action == 2:
+            if os.path.exists(j(dest_path, fname)):
+                print("Delete " + j(dest_path, fname))
+                rmtree(j(dest_path, fname))
+                del backup_tree.folders[fname]
+        elif folder.action == 1:
+            print("Copy %s -> %s" % (j(src_path, fname), j(dest_path, fname)))
+            copytree(j(src_path, fname), j(dest_path, fname))
+            folder.action = 0
+            recurse_action(folder, False, 0)
+            empty_folder = False
+        else:
+            perform_fs_tasks(folder, j(src_path, fname), j(dest_path, fname))
+
+    if empty_folder:
+        print("Delete folder " + dest_path)
+        os.rmdir(dest_path)
+
+def get_summary(backup_tree):
+    add, mod, rm = 0, 0, 0
+
+    for fname in sorted(backup_tree.files.keys()):
+        file = backup_tree.files[fname]
+        if file.action != 0 and file.drive == DRIVE:
+            add += file.action == 1
+            mod += file.action == 3
+            rm += file.action == 2
+
+    for fname in sorted(backup_tree.folders.keys()):
+        folder = backup_tree.folders[fname]
+        add_branch, mod_branch, rm_branch = get_summary(folder)
+        add += add_branch
+        mod += mod_branch
+        rm += rm_branch
+
+    return (add, mod, rm)
 
 def main():
+    global DRIVE
 
-    # Build a directory tree
+    # Build a directory tree for the source
     print("Building source directory tree")
     src_tree = build_fs_tree(".")
 
     # Load the backup tree
-    backup_tree = []
-    if os.path.exists(j(SRC, logFile)):
+    backup_tree = Tree({}, {})
+    free_space = disk_usage(os.path.splitdrive(DEST)[0]).free
+    if os.path.exists(j(SRC, LOGFILE)):
         print("Reading backup log")
-        with open(j(SRC, logFile), "r") as handle: backup_tree = load(handle, object_hook=treeJSONDecoder)
+        with open(j(SRC, LOGFILE), "r") as handle: backup_tree = load(handle, object_hook=customJSONDecoder)
+
+    # Load drive IDs
+    next_id = 0
+    print("Loading Drive ID")
+    if os.path.exists(j(SRC, "backupbuffet.nextid")):
+        with open(j(SRC, "backupbuffet.nextid"), "r") as saved_id:
+            next_id = int(saved_id.read())
+    if os.path.exists(j(DEST, "backupbuffet.id")):
+        with open(j(DEST, "backupbuffet.id"), "r") as saved_id:
+            DRIVE = int(saved_id.read())
+    else:
+        DRIVE = next_id
+        next_id += 1
+    print("Drive ID is %d" % DRIVE)
 
     # Get a list of files to back up, in a tree
-    print("Picking files")
-    dest_tree, backup_tree = get_files(src_tree, backup_tree, disk_usage(DEST).free)
+    print("Getting list of files to Add/Delete/Modify")
+    size_diff, backup_tree = get_files(src_tree, backup_tree, free_space)
+    add, mod, rm = get_summary(backup_tree)
 
-    # Display a summary of the data we're backing up
-    files, folders = get_stats(dest_tree)
-    root_folders = list(dest_tree.folders.keys())
-
-    print("About to backup %d bytes (~%d GB) in %d files and %d folders from %s.\nContinue?" % (
-        dest_tree.size,
-        dest_tree.size / (1024 ** 3),
-        files,
-        folders,
-        ", ".join(root_folders)
+    print("About to backup %d bytes (~%.1f GB)" % (
+        size_diff,
+        size_diff / (1024 ** 3)
     ))
+    print("Added: %d\nModified: %d\nDeleted: %d" % (add, mod, rm))
+    print("Continue [y/n]?")
 
     choice = input().lower()
     while not choice or choice[0] not in ["y", "n"]:
@@ -142,7 +289,16 @@ def main():
 
     print("Running backup!")
 
-    with open(j(SRC, logFile), "w") as output: dump(backup_tree, output, cls=treeJSONEncoder)
-    with open(j(DEST, "backupbuffet.json"), "w") as output: dump(dest_tree, output, cls=treeJSONEncoder)
+    if not os.path.exists(DEST):
+        os.makedirs(DEST)
+
+    # Save before and after incase it crashes
+    with open(j(SRC, LOGFILE), "w") as output: dump(backup_tree, output, cls=customJSONEncoder)
+    with open(j(DEST, LOGFILE), "w") as output: dump(backup_tree, output, cls=customJSONEncoder)
+    perform_fs_tasks(backup_tree)
+    with open(j(DEST, "backupbuffet.id"), "w") as saved_id: saved_id.write(str(DRIVE))
+    with open(j(SRC, "backupbuffet.nextid"), "w") as saved_id: saved_id.write(str(next_id))
+    with open(j(SRC, LOGFILE), "w") as output: dump(backup_tree, output, cls=customJSONEncoder)
+    with open(j(DEST, LOGFILE), "w") as output: dump(backup_tree, output, cls=customJSONEncoder)
 
 main()
