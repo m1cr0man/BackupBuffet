@@ -19,7 +19,7 @@ MAX_FREE = 1024 ** 3
 DRIVE = 0
 
 # Simulation mode stuff
-if argv[3] == "--sim":
+if len(argv) >= 4 and argv[3] == "--sim":
     voider = lambda x: True
     voider_2arg = lambda x, y: True
     os.remove = voider
@@ -102,13 +102,12 @@ def recurse_action(tree, set_drive=True, action=1):
 def get_files(main_tree, backup_tree, free_space):
 
     # If none of the folder is backed up, back up the whole thing
-    if not backup_tree.size:
-        if free_space - main_tree.size > 0:
-            main_tree.action = 1
+    if (not backup_tree.size) and free_space - main_tree.size > 0:
+        main_tree.action = 1
 
-            # Assign drive letter to all sub files
-            recurse_action(main_tree)
-            return (main_tree.size, main_tree)
+        # Assign drive letter to all sub files
+        recurse_action(main_tree)
+        return (main_tree.size, main_tree)
 
     orig_free_space = free_space
 
@@ -136,7 +135,8 @@ def get_files(main_tree, backup_tree, free_space):
         file = main_tree.files[fname]
 
         # Addition
-        if fname not in backup_tree.files:
+        # It's either not in the backup or the drive ID is -1
+        if fname not in backup_tree.files or backup_tree.files[fname].drive == -1:
             if free_space - file.size > 0:
                 file.action = 1
                 file.drive = DRIVE
@@ -157,19 +157,15 @@ def get_files(main_tree, backup_tree, free_space):
         if free_space < MAX_FREE:
             break
 
-        # TODO WHY THE FUCK ISNT THIS WORKING
-        if fname == "AddOns":
-            print(*["%s %d %d\n" % (i, v.action, v.drive) for i, v in backup_tree.folders[fname].files.items() if v.drive == -1])
-
         # Addition
         backup_subtree = backup_tree.folders.setdefault(fname, Tree({}, {}))
         size_diff, backup_subtree = get_files(folder, backup_subtree, free_space)
-        if size_diff:
-            backup_tree.folders[fname] = folder
-            free_space -= size_diff
 
         # Recalculate size of backup subtree
         backup_subtree.calc_size()
+        if size_diff:
+            backup_tree.folders[fname] = backup_subtree
+            free_space -= size_diff
 
     # Recalculate size of backup tree
     backup_tree.calc_size()
