@@ -133,8 +133,6 @@ def get_files(main_tree, backup_tree, free_space):
             continue
 
         file = main_tree.files[fname]
-        if fname == "ARMA2_OGG.cmd":
-            print("%d %d %d %d" % (file.mtime, backup_tree.files[fname].mtime, backup_tree.files[fname].drive, DRIVE))
 
         # Addition
         # It's either not in the backup or the drive ID is -1
