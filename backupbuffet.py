@@ -8,8 +8,8 @@ j = os.path.join
 LOGFILE = "backupbuffet.json"
 
 # Source & Destination directories
-SRC = argv[1]
-DEST = argv[2]
+SRC = os.path.abspath(argv[1])
+DEST = os.path.abspath(argv[2])
 
 # Max free space to leave in bytes
 # 1gb
@@ -19,7 +19,7 @@ MAX_FREE = 1024 ** 3
 DRIVE = 0
 
 # Simulation mode stuff
-if len(argv) >= 4 and argv[3] == "--sim":
+if "--sim" in argv:
     voider = lambda x: True
     voider_2arg = lambda x, y: True
     os.remove = voider
@@ -242,11 +242,20 @@ def main():
     print("Building source directory tree")
     src_tree = build_fs_tree(".")
 
+    # Get free space
+    # We have to figure out what the root directory is though
+    # Weird list comp is to avoid empty strings/paths
+    free_space = disk_usage(os.sep + [d for d in DEST.split(os.sep) if d][0]).free
+
+    # Use the destination if it exists (Because linux root path might not be on the destination drive)
+    if os.path.exists(DEST):
+        free_space = disk_usage(DEST).free
+
     # Load the backup tree
     backup_tree = Tree({}, {})
-    free_space = disk_usage(os.path.splitdrive(DEST)[0]).free
     if os.path.exists(j(SRC, LOGFILE)):
         print("Reading backup log")
+        # TODO sync the logs
         with open(j(SRC, LOGFILE), "r") as handle: backup_tree = load(handle, object_hook=customJSONDecoder)
 
     # Load drive IDs
@@ -280,7 +289,7 @@ def main():
         print("Yes or no?")
         choice = input().lower()
 
-    if choice == "n":
+    if choice != "y":
         print("Cancelling")
         return
 
