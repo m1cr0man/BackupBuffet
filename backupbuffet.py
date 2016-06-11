@@ -211,6 +211,7 @@ def perform_fs_tasks(backup_tree, src_path=SRC, dest_path=DEST):
             empty_folder = False
         else:
             perform_fs_tasks(folder, j(src_path, fname), j(dest_path, fname))
+            empty_folder = False
 
     if empty_folder:
         print("Delete folder " + dest_path)
