@@ -188,7 +188,8 @@ def perform_fs_tasks(backup_tree, src_path=SRC, dest_path=DEST):
             os.remove(j(dest_path, fname))
         if (file.action == 1 and file.drive == DRIVE) or file.action == 3:
             print("Copy %s -> %s" % (j(src_path, fname), j(dest_path, fname)))
-            copy2(j(src_path, fname), j(dest_path, fname))
+            if not os.path.exists(j(dest_path, fname)):
+                copy2(j(src_path, fname), j(dest_path, fname))
             empty_folder = False
         if file.action == 2:
             del backup_tree.files[fname]
@@ -205,7 +206,10 @@ def perform_fs_tasks(backup_tree, src_path=SRC, dest_path=DEST):
                 del backup_tree.folders[fname]
         elif folder.action == 1:
             print("Copy %s -> %s" % (j(src_path, fname), j(dest_path, fname)))
-            copytree(j(src_path, fname), j(dest_path, fname))
+            if "--continue" in argv:
+                perform_fs_tasks(folder, j(src_path, fname), j(dest_path, fname))
+            else:
+                copytree(j(src_path, fname), j(dest_path, fname))
             folder.action = 0
             recurse_action(folder, False, 0)
             empty_folder = False
@@ -274,8 +278,10 @@ def main():
     print("Drive ID is %d" % DRIVE)
 
     # Get a list of files to back up, in a tree
-    print("Getting list of files to Add/Delete/Modify")
-    size_diff, backup_tree = get_files(src_tree, backup_tree, free_space)
+    size_diff = 0
+    if "--continue" not in argv:
+        print("Getting list of files to Add/Delete/Modify")
+        size_diff, backup_tree = get_files(src_tree, backup_tree, free_space)
     add, mod, rm = get_summary(backup_tree)
 
     print("About to backup %d bytes (~%.1f GB)" % (
@@ -302,9 +308,9 @@ def main():
     # Save before and after incase it crashes
     with open(j(SRC, LOGFILE), "w") as output: dump(backup_tree, output, cls=customJSONEncoder)
     with open(j(DEST, LOGFILE), "w") as output: dump(backup_tree, output, cls=customJSONEncoder)
-    perform_fs_tasks(backup_tree)
     with open(j(DEST, "backupbuffet.id"), "w") as saved_id: saved_id.write(str(DRIVE))
     with open(j(SRC, "backupbuffet.nextid"), "w") as saved_id: saved_id.write(str(next_id))
+    perform_fs_tasks(backup_tree)
     with open(j(SRC, LOGFILE), "w") as output: dump(backup_tree, output, cls=customJSONEncoder)
     with open(j(DEST, LOGFILE), "w") as output: dump(backup_tree, output, cls=customJSONEncoder)
 
